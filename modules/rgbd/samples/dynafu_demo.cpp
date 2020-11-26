@@ -245,9 +245,13 @@ int main(int argc, char **argv)
                             viz::WCloudNormals cloudNormals(points, normals, /*level*/1, /*scale*/0.05, viz::Color::gray());
                             //window.showWidget("cloud", cloudWidget);
                             //window.showWidget("normals", cloudNormals);
-                            if(!df->getNodesPos().empty())
+                            std::vector<Point3f> nodesPts = df->getNodesPos();
+                            if(!nodesPts.empty())
                             {
-                                viz::WCloud nodeCloud(df->getNodesPos(), viz::Color::red());
+                                std::transform(nodesPts.begin(), nodesPts.end(),
+                                               nodesPts.begin(),
+                                               [params](const Point3f& p){ return params->volumePose*p; });
+                                viz::WCloud nodeCloud(nodesPts, viz::Color::red());
                                 nodeCloud.setRenderingProperty(viz::POINT_SIZE, 4);
                                 window.showWidget("nodes", nodeCloud);
                             }
@@ -280,7 +284,7 @@ int main(int argc, char **argv)
 
         imshow("render", rendered);
 
-        int c = waitKey(1);
+        int c = waitKey(100);
         switch (c)
         {
         case 'r':

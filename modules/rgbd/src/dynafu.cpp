@@ -5,12 +5,17 @@
 // This code is also subject to the license terms in the LICENSE_KinectFusion.md file found in this module's directory
 
 #include "precomp.hpp"
+
+#include "kinfu_frame.hpp"
+#include "fast_icp.hpp"
+
 #include "dynafu_tsdf.hpp"
 #include "warpfield.hpp"
-
-#include "fast_icp.hpp"
 #include "nonrigid_icp.hpp"
-#include "kinfu_frame.hpp"
+
+//VEEERY DEBUG
+//#include "dqb.hpp"
+#include "opencv2/viz.hpp"
 
 #include "opencv2/core/opengl.hpp"
 
@@ -135,7 +140,7 @@ private:
 
 template< typename T>
 std::vector<Point3f> DynaFuImpl<T>::getNodesPos() const {
-    NodeVectorType nv = warpfield.getNodes();
+    auto nv = warpfield.getNodes();
     std::vector<Point3f> nodesPos;
     for(auto n: nv)
         nodesPos.push_back(n->pos);
@@ -182,6 +187,9 @@ DynaFuImpl<T>::DynaFuImpl(const Params &_params) :
 template< typename T >
 void DynaFuImpl<T>::drawScene(OutputArray depthImage, OutputArray shadedImage)
 {
+
+    //TODO: no anti-aliased edges
+
 #ifdef HAVE_OPENGL
     glViewport(0, 0, params.frameSize.width, params.frameSize.height);
 
@@ -306,6 +314,69 @@ bool DynaFuImpl<T>::updateT(const T& _depth)
 {
     CV_TRACE_FUNCTION();
 
+
+    //VEEEEEERY DEBUG
+    if(false)
+    {
+        Vec3f axis1(0.f, 1.f, 0.f);
+        Vec3f axis2(0.f, 1.f, 1.f);
+        axis1 *= 1.f/sqrt(axis1.dot(axis1));
+        axis2 *= 1.f/sqrt(axis2.dot(axis2));
+        float angle1 = (float)(30.0*CV_PI/180.0);
+        float angle2 = (float)(45.0*CV_PI/180.0);
+        Vec3f shift1(1.f, 0.f, 5.f);
+        Vec3f shift2(8.f, 1.f, 0.0f);
+        Vec3f rot1 = axis1*angle1;
+        Vec3f rot2 = axis2*angle2;
+        Affine3f aff1(rot1, shift1);
+        Affine3f aff2(rot2, shift2);
+
+        viz::Viz3d debug("debug");
+        bool wireframe = false;
+
+        float cubeSize = 0.75f;
+        Vec3d cubeDim = Vec3d::all(cubeSize/2.f);
+        viz::WCube cube1(-cubeDim, cubeDim, wireframe, viz::Color(255.f, 0.f, 0.f));
+        viz::WCube cube2(-cubeDim, cubeDim, wireframe, viz::Color(0.f, 0.f, 255.f));
+
+        debug.showWidget("c1", cube1, aff1);
+        debug.showWidget("c2", cube2, aff2);
+
+        std::vector<Affine3f> poses(2);
+        poses[0] = aff1;
+        poses[1] = aff2;
+
+        int nposes = 20;
+        viz::WWidgetMerger cubes;
+        for(int i = 1; i < nposes; i++)
+        {
+            float t = i*(1.f/nposes);
+            float t1 = 1.f-t;
+            float t2 = t;
+            std::vector<float> weights(2);
+            weights[0] = t1;
+            weights[1] = t2;
+
+            Affine3f poset = DQB(weights, poses);
+
+            viz::Color color(255.f*t1, 0.f, 255.f*t2);
+            viz::WCube cubet(-cubeDim, cubeDim, wireframe, color);
+            cubes.addWidget(cubet, poset);
+        }
+        cubes.finalize();
+        debug.showWidget("cubes", cubes);
+
+        viz::WGrid grid;
+        viz::WCoordinateSystem coords;
+        debug.showWidget("coords", coords);
+        debug.showWidget("grid", grid);
+        debug.spin();
+
+        throw std::runtime_error("this is the end, my friend");
+    }
+
+
+
     T depth;
     if(_depth.type() != DEPTH_TYPE)
         _depth.convertTo(depth, DEPTH_TYPE);
@@ -328,16 +399,22 @@ bool DynaFuImpl<T>::updateT(const T& _depth)
 
         pyrPoints  = newPoints;
         pyrNormals = newNormals;
+        //TODO: check if this is redundant
         warpfield.setAllRT(Affine3f::Identity());
     }
     else
     {
+        // Obtain vertex data in cube's coordinates (voxelSize included)
+        // and use them to update warp field
+        //TODO: what if to use marchCubes() instead?
         UMat wfPoints;
         volume->fetchPointsNormals(wfPoints, noArray(), true);
         warpfield.updateNodesFromPoints(wfPoints);
 
+        // Render it using current cam pose but _with_ warping
         Mat _depthRender, estdDepth, _vertRender, _normRender;
-        renderSurface(_depthRender, _vertRender, _normRender, false);
+        // TODO: check if we really need to turn it off
+        renderSurface(_depthRender, _vertRender, _normRender, true);
         _depthRender.convertTo(estdDepth, DEPTH_TYPE);
 
         std::vector<T> estdPoints, estdNormals;
@@ -357,38 +434,201 @@ bool DynaFuImpl<T>::updateT(const T& _depth)
         if(!success)
             return false;
 
+        //VEEEERY DEBUG
+        if(false)
+        {
+            std::cout << "r: " << affine.rvec() << ", t:" << affine.translation() << std::endl;
+
+            viz::Viz3d debug("debug");
+
+            viz::WCloud woldPts(pyrPoints[0], viz::Color::green());
+            viz::WCloud wnewPts(newPoints[0], viz::Color::red());
+
+            debug.showWidget("old", woldPts);
+            debug.showWidget("new", wnewPts, affine);
+            viz::WCoordinateSystem coords;
+            debug.showWidget("coords", coords);
+            debug.spin();
+
+            throw std::runtime_error("this is the end, my friend");
+        }
+
         pose = pose * affine;
 
         for(int iter = 0; iter < 1; iter++)
         {
-            renderSurface(_depthRender, _vertRender, _normRender);
+            //TODO URGENT: different scales
+
+            // Render surface with vol pose, cam pose, ICP pose and warping
+            renderSurface(_depthRender, _vertRender, _normRender, true);
             _depthRender.convertTo(estdDepth, DEPTH_TYPE);
 
             makeFrameFromDepth(estdDepth, estdPoints, estdNormals, params.intr,
-                params.pyramidLevels,
-                1.f,
-                params.bilateral_sigma_depth,
-                params.bilateral_sigma_spatial,
-                params.bilateral_kernel_size,
-                params.truncateThreshold);
+                               params.pyramidLevels,
+                               1.f,
+                               params.bilateral_sigma_depth,
+                               params.bilateral_sigma_spatial,
+                               params.bilateral_kernel_size,
+                               params.truncateThreshold);
 
-            success = dynafuICP->estimateWarpNodes(warpfield, pose, _vertRender, estdPoints[0],
-                                                estdNormals[0],
-                                               newPoints[0], newNormals[0]);
+            success = dynafuICP->estimateWarpNodes(warpfield, pose, _vertRender, _normRender,
+                                                   estdPoints[0], estdNormals[0],
+                                                   newPoints[0], newNormals[0]);
             if(!success)
                 return false;
         }
 
         float rnorm = (float)cv::norm(affine.rvec());
         float tnorm = (float)cv::norm(affine.translation());
+        // TODO: measure warpfield too
         // We do not integrate volume if camera does not move
         if((rnorm + tnorm)/2 >= params.tsdf_min_camera_movement)
         {
             // use depth instead of distance
             volume->integrate(depth, params.depthFactor, pose, params.intr, makePtr<WarpField>(warpfield));
         }
+    }
+
+    //VEEERRY DEBUG
+    if(false)
+    //if(frameCounter == 2)
+    {
+        Mat _vertices, vertices, normals, newVertices, newNormals;
+        volume->marchCubes(_vertices, noArray());
+        _vertices.convertTo(vertices, POINT_TYPE);
+        getNormals(vertices, normals);
+
+        newVertices = vertices.clone(); newNormals = normals.clone();
+
+        std::vector<Point3f> nodesPts = getNodesPos();
+        std::transform(nodesPts.begin(), nodesPts.end(),
+                       nodesPts.begin(),
+                       [this](const Point3f& p){ return params.volumePose*p; });
+
+        viz::Viz3d debug("debug");
+
+        int nfix = 50;
+//        Affine3f tfix = warpfield.getNodes()[nfix]->transform;
+        for(int debugLoop = 0; debugLoop < 1000000; debugLoop++)
+        {
+            //transform
+//            for(uint i = 0; i < nodesPts.size(); i++)
+//            {
+//                warpfield.getNodes()[i]->transform = Affine3f();
+//            }
+//            warpfield.getNodes()[nfix]->transform = tfix.translate(Vec3f(sin(debugLoop*0.1f)*0.1f,
+//                                                                         cos(debugLoop*0.1f)*0.1f, 0.f));
+
+//            warpfield.getNodes()[nfix]->transform = Affine3f().translate(Vec3f(sin(debugLoop*0.1f)*0.1f,
+//                                                                               cos(debugLoop*0.1f)*0.1f, 0.f));
+
+            float cc = cos(debugLoop*0.1f), ss = sin(debugLoop*0.1f);
+            Matx33f mr{cc, 0, ss,
+                        0, 1, 0,
+                      -ss, 0, cc};
+            Vec3f mt {0.05f*cc, 0, 0.03f*ss };
+            warpfield.getNodes()[nfix]->transform = UnitDualQuaternion(Affine3f(mr, mt));
 
 
+            std::vector<Point3f> nodesTo = nodesPts;
+            for(uint i = 0; i < nodesPts.size(); i++)
+            {
+                Point3f pos = nodesPts[i];
+                Point3f tr = warpfield.getNodes()[i]->transform.getT();
+                //TODO: other neighbors
+                nodesTo[i] = pos + tr;
+            }
+
+            for (int i = 0; i < (int)vertices.total(); i++)
+            {
+                Vec4f vv = vertices.at<Vec4f>(i);
+                Vec4f nn = normals.at<Vec4f>(i);
+
+                Point3f pt, nrm;
+                pt = Point3f(vv[0], vv[1], vv[2]);
+                nrm = Point3f(nn[0], nn[1], nn[2]);
+                Point3f transformedPt, transformedNrm;
+
+                Vec3f volPt = volume->pose.inv() * pt;
+                Point3i voxelCoord(volPt[0]/volume->voxelSize,
+                                   volPt[1]/volume->voxelSize,
+                                   volPt[2]/volume->voxelSize);
+                int n;
+                NodeNeighboursType neighbours = volume->getVoxelNeighbours(voxelCoord, n);
+
+                bool found = false;
+                for(int nnum = 0; nnum < n; nnum++)
+                {
+                    if(neighbours[nnum] == nfix)
+                        found = true;
+                }
+                if(!found)
+                    continue;
+
+                std::vector<float> weights(n);
+                std::vector<Affine3f> transforms(n);
+                std::vector<Ptr<WarpNode>> nodes(n);
+                float totalWeightSquare = 0.f;
+                for(int nnum = 0; nnum < n; nnum++)
+                {
+                    size_t nn = neighbours[nnum];
+                    Ptr<WarpNode> neigh = warpfield.getNodes()[nn];
+                    nodes[nnum] = neigh;
+                    float w = neigh->weight(volPt);
+
+                    if(isnan(w))
+                        throw std::runtime_error("w is nan aaaaaa");
+
+                    weights[nnum]= w;
+                    transforms[nnum] = neigh->centeredRt().getRt();
+
+                    //Affine3f rti = neigh->transform;
+                    //Point3f pos = neigh->pos;
+                    //rti = Affine3f().translate(-pos).rotate(rti.rotation()).translate(pos).translate(rti.translation());
+                    //rti = (Affine3f().translate(-pos) * rti).translate(pos);
+                    //transforms[nnum] = rti;
+
+                    totalWeightSquare += w*w;
+                }
+                Affine3f rt = DQB(weights, transforms);
+
+                if(!(abs(totalWeightSquare) > 0.001f))
+                {
+                    //throw std::runtime_error("aawh at theff ck");
+                    rt = Affine3f();
+                }
+
+                Affine3f rtGlobal = volume->pose * rt * volume->pose.inv();
+
+                transformedPt = rtGlobal*pt;
+                transformedNrm = Affine3f().rotate(rtGlobal.rotation()) * nrm;
+
+                newVertices.at<Vec4f>(i) = Vec4f(transformedPt .x, transformedPt .y, transformedPt .z);
+                newNormals .at<Vec4f>(i) = Vec4f(transformedNrm.x, transformedNrm.y, transformedNrm.z);
+            }
+
+            viz::WCloud cloud(newVertices);
+            viz::WCloudNormals wnormals(newVertices, newNormals, 1, 0.02);
+            debug.showWidget("cloud", cloud);
+            debug.showWidget("normals", wnormals);
+            Vec3d volSize = params.voxelSize*params.volumeDims;
+            debug.showWidget("cube", viz::WCube(Vec3d::all(0),
+                                                 volSize),
+                              params.volumePose);
+            viz::WCoordinateSystem nodeCoords(0.1f);
+            Point3f nodePos = volume->pose * warpfield.getNodes()[nfix]->pos;
+            Affine3f nodeRot = warpfield.getNodes()[nfix]->transform.getRt();
+            debug.showWidget("nodepos", nodeCoords, Affine3f(nodeRot.rotation()).translate(nodePos));
+
+            viz::WCloud nodeCloud(nodesPts, viz::Color::red());
+            nodeCloud.setRenderingProperty(viz::POINT_SIZE, 4);
+            viz::WCloud nodeTargets(nodesTo, viz::Color::yellow());
+            nodeTargets.setRenderingProperty(viz::POINT_SIZE, 2);
+            debug.showWidget("nodes", nodeCloud);
+            debug.showWidget("targets", nodeTargets);
+
+            debug.spinOnce();
+        }
     }
 
     std::cout << "Frame# " << frameCounter++ << std::endl;
@@ -458,7 +698,8 @@ void DynaFuImpl<T>::renderSurface(OutputArray depthImage, OutputArray vertImage,
     Mat warpedVerts(vertices.size(), vertices.type());
 
     Affine3f invCamPose(pose.inv());
-    for(int i = 0; i < vertices.size().height; i++) {
+    for(int i = 0; i < vertices.size().height; i++)
+    {
         ptype v = vertices.at<ptype>(i);
 
         // transform vertex to RGB space
@@ -486,7 +727,7 @@ void DynaFuImpl<T>::renderSurface(OutputArray depthImage, OutputArray vertImage,
         else
         {
             int numNeighbours = 0;
-            const nodeNeighboursType neighbours = volume->getVoxelNeighbours(pVoxel, numNeighbours);
+            const NodeNeighboursType neighbours = volume->getVoxelNeighbours(pVoxel, numNeighbours);
             Point3f p = (invCamPose * params.volumePose) * warpfield.applyWarp(pVoxel*params.voxelSize, neighbours, numNeighbours);
             warpedVerts.at<ptype>(i) = ptype(p.x, p.y, p.z, 1.f);
         }

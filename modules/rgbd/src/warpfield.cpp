@@ -4,33 +4,6 @@
 namespace cv {
 namespace dynafu {
 
-WarpField::WarpField(int _maxNeighbours, int K, int levels, float baseResolution, float resolutionGrowth):
-k(K), n_levels(levels),
-nodes(), maxNeighbours(_maxNeighbours), // good amount for dense kinfu pointclouds
-baseRes(baseResolution),
-resGrowthRate(resolutionGrowth),
-regGraphNodes(n_levels-1),
-heirarchy(n_levels-1),
-nodeIndex(nullptr)
-{
-    CV_Assert(k <= DYNAFU_MAX_NEIGHBOURS);
-}
-
-NodeVectorType const& WarpField::getNodes() const
-{
-    return nodes;
-}
-
-std::vector<NodeVectorType> const& WarpField::getGraphNodes() const
-{
-    return regGraphNodes;
-}
-
-heirarchyType const& WarpField::getRegGraph() const
-{
-    return heirarchy;
-}
-
 bool PtCmp(cv::Point3f a, cv::Point3f b)
 {
     return (a.x < b.x) ||
@@ -38,12 +11,7 @@ bool PtCmp(cv::Point3f a, cv::Point3f b)
             ((a.x >= b.x) && (a.y >= b.y) && (a.z < b.z));
 }
 
-Ptr<flann::GenericIndex<flann::L2_Simple<float> > > WarpField::getNodeIndex() const
-{
-    return nodeIndex;
-}
-
-Mat getNodesPos(NodeVectorType nv)
+Mat getNodesPos(const std::vector<Ptr<WarpNode> >& nv)
 {
     Mat nodePos((int)nv.size(), 3, CV_32F);
     for(int i = 0; i < (int)nv.size(); i++)
@@ -55,6 +23,12 @@ Mat getNodesPos(NodeVectorType nv)
     return nodePos;
 }
 
+/*
+1. Find a set of new points that are not covered by existing nodes yet
+2. Covers them by a new set of nodes
+3. Adds these nodes to a set of nodes
+4. Rebuilds an index
+*/
 void WarpField::updateNodesFromPoints(InputArray inputPoints)
 {
     Mat points_matrix(inputPoints.size().height, 3, CV_32F);
@@ -73,7 +47,7 @@ void WarpField::updateNodesFromPoints(InputArray inputPoints)
     AutoBuffer<bool> validIndex;
     removeSupported(searchIndex, validIndex);
 
-    NodeVectorType newNodes;
+    std::vector<Ptr<WarpNode> > newNodes;
     if((int)nodes.size() > k)
     {
         newNodes = subsampleIndex(points_matrix, searchIndex, validIndex, baseRes, nodeIndex);
@@ -95,7 +69,7 @@ void WarpField::updateNodesFromPoints(InputArray inputPoints)
 
 
 void WarpField::removeSupported(flann::GenericIndex<flann::L2_Simple<float> >& ind,
-                                  AutoBuffer<bool>& validInd)
+                                AutoBuffer<bool>& validInd)
 {
     validInd.allocate(ind.size());
     std::fill_n(validInd.data(), ind.size(), true);
@@ -113,18 +87,22 @@ void WarpField::removeSupported(flann::GenericIndex<flann::L2_Simple<float> >& i
         {
             validInd[i] = false;
         }
-
     }
 }
 
-NodeVectorType WarpField::subsampleIndex(Mat& pmat,
-                                         flann::GenericIndex<flann::L2_Simple<float> >& ind,
-                                         AutoBuffer<bool>& validIndex, float res,
-                                         Ptr<flann::GenericIndex<flann::L2_Simple<float> > > knnIndex)
+/*
+Covers given (valid) points `pmat` and their search index `ind` by nodes with radius `res`.
+Returns a set of nodes that cover the points.
+*/
+//TODO: fix its undefined order of coverage
+std::vector<Ptr<WarpNode> > WarpField::subsampleIndex(Mat& pmat,
+                                                      flann::GenericIndex<flann::L2_Simple<float> >& ind,
+                                                      AutoBuffer<bool>& validIndex, float res,
+                                                      Ptr<flann::GenericIndex<flann::L2_Simple<float> > > knnIndex)
 {
     CV_TRACE_FUNCTION();
 
-    NodeVectorType temp_nodes;
+    std::vector<Ptr<WarpNode> > temp_nodes;
 
     for(int i = 0; i < (int)validIndex.size(); i++)
     {
@@ -137,7 +115,6 @@ NodeVectorType WarpField::subsampleIndex(Mat& pmat,
         std::vector<float> dist_vec(maxNeighbours);
 
         ind.radiusSearch(pmat.row(i), indices_vec, dist_vec, res, cvflann::SearchParams());
-
 
         Ptr<WarpNode> wn = new WarpNode;
         Point3f centre(0, 0, 0);
@@ -176,7 +153,7 @@ NodeVectorType WarpField::subsampleIndex(Mat& pmat,
             wn->radius = res;
         }
 
-        wn->transform = Affine3f::Identity();
+        wn->transform = UnitDualQuaternion();
 
         temp_nodes.push_back(wn);
     }
@@ -184,7 +161,11 @@ NodeVectorType WarpField::subsampleIndex(Mat& pmat,
     return temp_nodes;
 }
 
-void WarpField::initTransforms(NodeVectorType nv)
+
+/*
+Sets each node's transform to a DQB-interpolated transform of other nodes in the node's center.
+*/
+void WarpField::initTransforms(std::vector<Ptr<WarpNode> > nv)
 {
     if(nodesPos.size().height == 0)
     {
@@ -198,10 +179,10 @@ void WarpField::initTransforms(NodeVectorType nv)
 
         std::vector<float> query = {nodePtr->pos.x, nodePtr->pos.y, nodePtr->pos.z};
 
-        nodeIndex->knnSearch(query ,knnIndices, knnDists, k, cvflann::SearchParams());
+        nodeIndex->knnSearch(query, knnIndices, knnDists, k, cvflann::SearchParams());
 
         std::vector<float> weights(knnIndices.size());
-        std::vector<Affine3f> transforms(knnIndices.size());
+        std::vector<UnitDualQuaternion> transforms(knnIndices.size());
 
         size_t i = 0;
         for(int idx: knnIndices)
@@ -210,22 +191,17 @@ void WarpField::initTransforms(NodeVectorType nv)
             transforms[i++] = nodes[idx]->transform;
         }
 
-        Affine3f pose = DQB(weights, transforms);
-        // linearly interpolate translations
-        Vec3f translation(0,0,0);
-        float totalWeight = 0;
-        for(i = 0; i < transforms.size(); i++)
-        {
-            translation += weights[i]*transforms[i].translation();
-            totalWeight += weights[i];
-        }
-
-        if(totalWeight < 1e-5) translation = Vec3f(0, 0, 0);
-        else translation /= totalWeight;
-        nodePtr->transform = Affine3f(pose.rotation(), translation);
+        UnitDualQuaternion pose = DQB(weights, transforms);
+        nodePtr->transform = pose;
     }
 }
 
+
+/*
+ At each level l of nodes:
+ * subsample them -> nodes[l+1]
+ *
+*/
 void WarpField::constructRegGraph()
 {
     CV_TRACE_FUNCTION();
@@ -238,7 +214,7 @@ void WarpField::constructRegGraph()
     }
 
     float effResolution = baseRes*resGrowthRate;
-    NodeVectorType curNodes = nodes;
+    std::vector<Ptr<WarpNode> > curNodes = nodes;
     Mat curNodeMatrix = getNodesPos(curNodes);
 
     Ptr<flann::GenericIndex<flann::L2_Simple<float> > > curNodeIndex(
@@ -251,8 +227,8 @@ void WarpField::constructRegGraph()
         nodeValidity.allocate(curNodeIndex->size());
 
         std::fill_n(nodeValidity.data(), curNodeIndex->size(), true);
-        NodeVectorType coarseNodes = subsampleIndex(curNodeMatrix, *curNodeIndex, nodeValidity,
-                                                    effResolution);
+        std::vector<Ptr<WarpNode> > coarseNodes = subsampleIndex(curNodeMatrix, *curNodeIndex, nodeValidity,
+                                                                 effResolution);
 
         initTransforms(coarseNodes);
 
@@ -262,7 +238,7 @@ void WarpField::constructRegGraph()
             new flann::GenericIndex<flann::L2_Simple<float> >(coarseNodeMatrix,
                                                               cvflann::LinearIndexParams()));
 
-        heirarchy[l] = std::vector<nodeNeighboursType>(curNodes.size());
+        hierarchy[l] = std::vector<NodeNeighboursType>(curNodes.size());
         for(int i = 0; i < (int)curNodes.size(); i++)
         {
             std::vector<int> children_indices(k);
@@ -274,8 +250,8 @@ void WarpField::constructRegGraph()
 
             coarseNodeIndex->knnSearch(query, children_indices, children_dists, k,
                                        cvflann::SearchParams());
-            heirarchy[l][i].fill(-1);
-            std::copy(children_indices.begin(), children_indices.end(), heirarchy[l][i].begin());
+            hierarchy[l][i].fill((size_t)-1);
+            std::copy(children_indices.begin(), children_indices.end(), hierarchy[l][i].begin());
         }
 
         regGraphNodes.push_back(coarseNodes);
@@ -284,68 +260,49 @@ void WarpField::constructRegGraph()
         curNodeIndex = coarseNodeIndex;
         effResolution *= resGrowthRate;
     }
-
 }
 
-Point3f WarpField::applyWarp(Point3f p, const nodeNeighboursType neighbours, int n, bool normal) const
+
+/*
+Calculate DQB transform at point p and apply it to p
+Normal calculation is done the same way but translation is not applied
+*/
+Point3f WarpField::applyWarp(Point3f p, const NodeNeighboursType neighbours, int n, bool normal) const
 {
     CV_TRACE_FUNCTION();
 
-    if(n == 0)
-    {
+    // DQB:
+
+    if(!n)
         return p;
-    }
 
-    float totalWeight = 0;
-    Point3f WarpedPt(0,0,0);
-
+    std::vector<float> weights(n);
+    std::vector<UnitDualQuaternion> transforms(n);
+    float totalWeightSquare = 0.f;
     for(int i = 0; i < n; i++)
     {
         Ptr<WarpNode> neigh = nodes[neighbours[i]];
+        transforms[i] = neigh->centeredRt();
         float w = neigh->weight(p);
-        if(w < 0.01)
-        {
-            continue;
-        }
-
-        Matx33f R = neigh->transform.rotation();
-        Point3f newPt(0, 0, 0);
-
+        weights[i]= w;
+        totalWeightSquare = w*w;
+    }
+    if(abs(totalWeightSquare) > 0.001f)
+    {
+        Affine3f rt = DQB(weights, transforms).getRt();
         if(normal)
         {
-            newPt = R * p;
+            Affine3f r(rt.rotation());
+            return r*p;
         }
         else
         {
-            newPt = R * (p - neigh->pos) + neigh->pos;
-            Vec3f T = neigh->transform.translation();
-            newPt.x += T[0];
-            newPt.y += T[1];
-            newPt.z += T[2];
+            return rt*p;
         }
-
-        WarpedPt += newPt * w;
-        totalWeight += w;
-
-    }
-    WarpedPt /= totalWeight;
-
-    if(totalWeight == 0)
-    {
-        return p;
     }
     else
     {
-        return WarpedPt;
-    }
-
-}
-
-void WarpField::setAllRT(Affine3f warpRT)
-{
-    for(auto n: nodes)
-    {
-        n->transform = warpRT;
+        return p;
     }
 }
 

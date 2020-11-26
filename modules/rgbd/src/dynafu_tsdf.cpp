@@ -22,7 +22,7 @@ struct Voxel
 {
     volumeType v;
     float weight;
-    nodeNeighboursType neighbours;
+    NodeNeighboursType neighbours;
     float neighbourDists[DYNAFU_MAX_NEIGHBOURS];
     int n;
 };
@@ -50,7 +50,7 @@ public:
     volumeType interpolateVoxel(cv::Point3f p) const;
     Point3f getNormalVoxel(cv::Point3f p) const;
 
-    nodeNeighboursType const& getVoxelNeighbours(Point3i coords, int& n) const override;
+    NodeNeighboursType const& getVoxelNeighbours(Point3i coords, int& n) const override;
 
     // See zFirstMemOrder arg of parent class constructor
     // for the array layout info
@@ -286,6 +286,7 @@ struct IntegrateInvoker : ParallelLoopBody
                         // update TSDF
                         float newWeight = 0;
 
+                        //TODO: check this place for correctness
                         if(warpfield->getNodesLen() >= (size_t)warpfield->k)
                         {
                             for(int i = 0; i < voxel.n; i++)
@@ -295,6 +296,7 @@ struct IntegrateInvoker : ParallelLoopBody
 
                         } else newWeight = 1.f;
 
+                        //TODO: check this place for correctness
                         if((weight + newWeight) != 0)
                         {
                             value = (value*weight+tsdf*newWeight) / (weight+newWeight);
@@ -927,7 +929,7 @@ void TSDFVolumeCPU::marchCubes(OutputArray _vertices, OutputArray _edges) const
         Mat((int)meshPoints.size(), 2, CV_32S, &meshEdges[0]).copyTo(_edges);
 }
 
-nodeNeighboursType const& TSDFVolumeCPU::getVoxelNeighbours(Point3i v, int& n) const
+NodeNeighboursType const& TSDFVolumeCPU::getVoxelNeighbours(Point3i v, int& n) const
 {
     int baseX = v.x * volDims[0];
     int baseY = baseX + v.y * volDims[1];
