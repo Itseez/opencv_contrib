@@ -7,17 +7,30 @@
 
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/rgbd/kinfu.hpp>
 #include <opencv2/rgbd/large_kinfu.hpp>
 #include <opencv2/rgbd/colored_kinfu.hpp>
+#include <opencv2/core/quaternion.hpp>
 
 namespace cv
 {
 namespace io_utils
 {
+
+struct _Time
+{
+    long int _int;
+    long double _fract;
+};
+
+static bool operator>(const _Time& a1, const _Time& a2)
+{
+    return (a1._int > a2._int) || (a1._int == a2._int && a1._fract > a2._fract);
+}
 
 static std::vector<std::string> readDepth(const std::string& fileList)
 {
@@ -45,6 +58,33 @@ static std::vector<std::string> readDepth(const std::string& fileList)
         v.push_back(dir + '/' + imgPath);
     }
 
+    return v;
+}
+
+static std::vector<_Time> readDepthTime(const std::string& fileList)
+{
+    std::vector<_Time> v;
+
+    std::fstream file(fileList);
+    if (!file.is_open())
+        throw std::runtime_error("Failed to read depth list");
+
+    while (!file.eof())
+    {
+        std::string s, imgPath;
+        std::getline(file, s);
+        if (s.empty() || s[0] == '#')
+            continue;
+
+        std::istringstream iss(s);
+        std::vector<std::string> results(std::istream_iterator<std::string>{iss}, std::istream_iterator<std::string>());
+        std::string str_i = results[0], str_f = results[0];
+        size_t dot = results[0].find(".");
+        _Time _time;
+        _time._int = std::stoi(str_i.erase(dot));
+        _time._fract = std::stold(str_f.erase(0, dot));
+        v.push_back(_time);
+    };
     return v;
 }
 
@@ -140,6 +180,8 @@ struct DepthSource
     DepthSource(String fileListName, int cam)
         : depthFileList(fileListName.empty() ? std::vector<std::string>()
                                              : readDepth(fileListName)),
+          depthTimeList(fileListName.empty() ? std::vector<_Time>()
+                                             : readDepthTime(fileListName)),
           frameIdx(0),
           undistortMap1(),
           undistortMap2()
@@ -368,11 +410,120 @@ struct DepthSource
         }
     }
 
+    _Time getTime()
+    {
+        return(depthTimeList[frameIdx]);
+    }
+
     std::vector<std::string> depthFileList;
+    std::vector<_Time> depthTimeList;
+
     size_t frameIdx;
     VideoCapture vc;
     UMat undistortMap1, undistortMap2;
     Type sourceType;
+};
+
+static std::vector<std::string> readQ(const std::string& fileList)
+{
+    std::vector<std::string> v;
+
+    std::fstream file(fileList);
+    if (!file.is_open())
+        throw std::runtime_error("Failed to read depth list");
+
+    while (!file.eof())
+    {
+        std::string s;
+        std::getline(file, s);
+        if (s.empty() || s[0] == '#')
+            continue;
+        v.push_back(s);
+    }
+
+    return v;
+}
+
+struct QSource
+{
+   public:
+
+        QSource(String fileListName)
+        : qFileList(fileListName.empty() ? std::vector<std::string>()
+                                                : readQ(fileListName)),
+            frameIdx(1),
+            prevFrameIdx(0),
+            undistortMap1(),
+            undistortMap2()
+        {
+        }
+
+        Affine3f getCurrQ()
+        {
+            std::istringstream iss(qFileList[frameIdx]);
+            frameIdx++;
+            std::vector<std::string> results(std::istream_iterator<std::string>{iss}, std::istream_iterator<std::string>());
+            float tx, ty, tz, qx, qy, qz, qw;
+            tx = std::stof(results[1]);
+            ty = std::stof(results[2]);
+            tz = std::stof(results[3]);
+            qx = std::stof(results[4]);
+            qy = std::stof(results[5]);
+            qz = std::stof(results[6]);
+            qw = std::stof(results[7]);
+
+            cv::Quatf q(qw, qx, qy, qz);
+            Matx33f R = q.toRotMat3x3();
+            Vec3f t(tx, ty, tz);
+
+            Affine3f T(R, t);
+            return T;
+        }
+
+        Affine3f getCurrQ(_Time time)
+        {
+            _Time curr_time;
+            curr_time._int = 0;
+            curr_time._fract = 0;
+            std::string str_i, str_f;
+            size_t dot, idx = prevFrameIdx;
+            while (time > curr_time)
+            {
+                std::istringstream iss(qFileList[idx]);
+                std::vector<std::string> results(std::istream_iterator<std::string>{iss}, std::istream_iterator<std::string>());
+                str_i = results[0], str_f = results[0];
+                 dot = results[0].find(".");
+                curr_time._int = std::stoi(str_i.erase(dot));
+                curr_time._fract = std::stold(str_f.erase(0, dot));
+                idx++;
+            }
+            idx-=2;
+            prevFrameIdx = idx;
+            std::istringstream iss(qFileList[idx]);
+            std::vector<std::string> results(std::istream_iterator<std::string>{iss}, std::istream_iterator<std::string>());
+
+            float tx, ty, tz, qx, qy, qz, qw;
+            tx = std::stof(results[1]);
+            ty = std::stof(results[2]);
+            tz = std::stof(results[3]);
+            qx = std::stof(results[4]);
+            qy = std::stof(results[5]);
+            qz = std::stof(results[6]);
+            qw = std::stof(results[7]);
+
+            cv::Quatf q(qw, qx, qy, qz);
+            Matx33f R = q.toRotMat3x3();
+            Vec3f t(tx, ty, tz);
+
+            Affine3f T(R, t);
+            return T;
+        }
+
+        bool empty() { return qFileList.empty(); }
+
+        std::vector<std::string> qFileList;
+        size_t frameIdx, prevFrameIdx;
+        UMat undistortMap1, undistortMap2;
 };
 
 

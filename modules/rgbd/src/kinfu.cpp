@@ -137,12 +137,15 @@ public:
     void getNormals(InputArray points, OutputArray normals) const CV_OVERRIDE;
 
     void reset() CV_OVERRIDE;
+    void reset(Matx44f _pose) CV_OVERRIDE;
 
     const Affine3f getPose() const CV_OVERRIDE;
 
     bool update(InputArray depth) CV_OVERRIDE;
+    bool update(InputArray depth, Matx44f _pose) CV_OVERRIDE;
 
     bool updateT(const MatType& depth);
+    bool updateT(const MatType& depth, Matx44f _pose);
 
 private:
     Params params;
@@ -173,6 +176,14 @@ void KinFuImpl<MatType >::reset()
 {
     frameCounter = 0;
     pose = Affine3f::Identity().matrix;
+    volume->reset();
+}
+
+template< typename MatType >
+void KinFuImpl<MatType >::reset(Matx44f _pose)
+{
+    frameCounter = 0;
+    pose = _pose;
     volume->reset();
 }
 
@@ -264,7 +275,6 @@ bool KinFuImpl<MatType>::updateT(const MatType& _depth)
             return false;
 
         pose = (Affine3f(pose) * affine).matrix;
-
         float rnorm = (float)cv::norm(affine.rvec());
         float tnorm = (float)cv::norm(affine.translation());
         // We do not integrate volume if camera does not move
@@ -273,6 +283,87 @@ bool KinFuImpl<MatType>::updateT(const MatType& _depth)
             // use depth instead of distance
             volume->integrate(depth, params.depthFactor, pose, params.intr);
         }
+        MatType& points  = pyrPoints [0];
+        MatType& normals = pyrNormals[0];
+        volume->raycast(pose, params.intr, params.frameSize, points, normals);
+        buildPyramidPointsNormals(points, normals, pyrPoints, pyrNormals,
+                                  params.pyramidLevels);
+    }
+
+    frameCounter++;
+    return true;
+}
+
+template<>
+bool KinFuImpl<Mat>::update(InputArray _depth, Matx44f _pose)
+{
+    CV_Assert(!_depth.empty() && _depth.size() == params.frameSize);
+
+    Mat depth;
+    if(_depth.isUMat())
+    {
+        _depth.copyTo(depth);
+        return updateT(depth, _pose);
+    }
+    else
+    {
+        return updateT(_depth.getMat(), _pose);
+    }
+}
+
+
+template<>
+bool KinFuImpl<UMat>::update(InputArray _depth, Matx44f _pose)
+{
+    CV_Assert(!_depth.empty() && _depth.size() == params.frameSize);
+
+    UMat depth;
+    if(!_depth.isUMat())
+    {
+        _depth.copyTo(depth);
+        return updateT(depth, _pose);
+    }
+    else
+    {
+        return updateT(_depth.getUMat(), _pose);
+    }
+}
+
+
+template< typename MatType >
+bool KinFuImpl<MatType>::updateT(const MatType& _depth, Matx44f _pose)
+{
+    CV_TRACE_FUNCTION();
+
+    MatType depth;
+    if(_depth.type() != DEPTH_TYPE)
+        _depth.convertTo(depth, DEPTH_TYPE);
+    else
+        depth = _depth;
+
+
+    std::vector<MatType> newPoints, newNormals;
+    makeFrameFromDepth(depth, newPoints, newNormals, params.intr,
+                       params.pyramidLevels,
+                       params.depthFactor,
+                       params.bilateral_sigma_depth,
+                       params.bilateral_sigma_spatial,
+                       params.bilateral_kernel_size,
+                       params.truncateThreshold);
+    if(frameCounter == 0)
+    {
+        // use depth instead of distance
+        volume->integrate(depth, params.depthFactor, pose, params.intr);
+        pyrPoints  = newPoints;
+        pyrNormals = newNormals;
+    }
+    else
+    {
+        pose = _pose;
+
+        // use depth instead of distance
+        volume->integrate(depth, params.depthFactor, pose, params.intr);
+
         MatType& points  = pyrPoints [0];
         MatType& normals = pyrNormals[0];
         volume->raycast(pose, params.intr, params.frameSize, points, normals);

@@ -250,6 +250,11 @@ public:
     */
     CV_WRAP virtual void reset() = 0;
 
+    /** @brief Resets the algorithm
+
+    Clears current model and resets a pose.
+    */
+    CV_WRAP virtual void reset(Matx44f _pose) = 0;
     /** @brief Get current pose in voxel space */
     virtual const Affine3f getPose() const = 0;
 
@@ -262,6 +267,17 @@ public:
     @return true if succeeded to align new frame with current scene, false if opposite
     */
     CV_WRAP virtual bool update(InputArray depth) = 0;
+
+    /** @brief Process next depth frame
+
+      Integrates depth into voxel space with respect to its ICP-calculated pose.
+      Input image is converted to CV_32F internally if has another type.
+
+    @param depth one-channel image which size and depth scale is described in algorithm's parameters
+    @param _pose is pose of cam
+    @return true if succeeded to align new frame with current scene, false if opposite
+    */
+    CV_WRAP virtual bool update(InputArray depth, Matx44f _pose) = 0;
 };
 
 //! @}

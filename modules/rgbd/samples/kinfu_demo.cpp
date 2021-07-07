@@ -6,6 +6,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <iterator>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/highgui.hpp>
@@ -53,6 +54,7 @@ static const char* keys =
 {
     "{help h usage ? | | print this message   }"
     "{depth  | | Path to depth.txt file listing a set of depth images }"
+    "{gt     | | Path to groundtruth.txt file listing a set of depth images }"
     "{camera |0| Index of depth camera to be used as a depth source }"
     "{coarse | | Run on coarse settings (fast but ugly) or on default (slow but looks better),"
         " in coarse mode points and normals are displayed }"
@@ -124,6 +126,14 @@ int main(int argc, char **argv)
     if(!recordPath.empty())
         depthWriter = makePtr<DepthWriter>(recordPath);
 
+    Ptr<QSource> qs;
+    bool haveQS = false;
+    if (parser.has("gt"))
+    {
+        qs = makePtr<QSource>(parser.get<String>("gt"));
+        haveQS = true;
+    }
+
     Ptr<Params> params;
     Ptr<KinFu> kf;
 
@@ -164,10 +174,17 @@ int main(int argc, char **argv)
 
     int64 prevTime = getTickCount();
 
+    if (haveQS)
+        kf->reset( qs->getCurrQ(ds->getTime()).matrix );
+
     for(UMat frame = ds->getDepth(); !frame.empty(); frame = ds->getDepth())
     {
         if(depthWriter)
             depthWriter->append(frame);
+
+        Matx44f pose;
+        if (haveQS)
+            pose = qs->getCurrQ(ds->getTime()).matrix;
 
 #ifdef HAVE_OPENCV_VIZ
         if(pause)
@@ -208,7 +225,12 @@ int main(int argc, char **argv)
             {
                 imshow("depth", cvt8);
 
-                if(!kf->update(frame))
+                bool isCorr;
+                if (haveQS)
+                    isCorr = !kf->update(frame, pose);
+                else
+                    isCorr = !kf->update(frame);
+                if(isCorr)
                 {
                     kf->reset();
                     std::cout << "reset" << std::endl;
