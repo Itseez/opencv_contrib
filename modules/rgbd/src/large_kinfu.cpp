@@ -193,25 +193,107 @@ bool LargeKinfuImpl<Mat>::update(InputArray _depth)
 }
 
 template<>
-bool LargeKinfuImpl<UMat>::update(InputArray _depth)
+bool LargeKinfuImpl<UMat>::update(InputArray _depth, InputArray _rgb)
 {
     CV_Assert(!_depth.empty() && _depth.size() == params.frameSize);
 
-    UMat depth;
-    if (!_depth.isUMat())
+    UMat depth, rgb;
+    if (!(_depth.isUMat() && _rgb.isUMat()))
     {
-        _depth.copyTo(depth);
-        return updateT(depth);
+        if (!_depth.isUMat()) _depth.copyTo(depth);
+        if (!_rgb.isUMat()) _rgb.copyTo(rgb);
+
+        return updateT(depth, rgb);
     }
     else
     {
-        return updateT(_depth.getUMat());
+        return updateT(_depth.getUMat(), _rgb.getUMat());
     }
 }
 
 
+struct PQueueElem
+{
+    PQueueElem() : score(0), keypoint(0, 0) {}
+    PQueueElem(float _score, Point2i _keypoint) : score(_score), keypoint(_keypoint) {}
+    float score;
+    Point2i keypoint(0, 0);
+
+    bool
+    operator<(const PQueueElem p1) const
+    {
+        return (this->score > p1.score);
+    }
+};
+
+void keypointSelection(InputArray score, vector<PQueueElem> &keypoints, const int  keypointNumber, const float kepointThreshold)
+{
+    vector<PQueueElem> queue;
+    float temp = 0;
+    int number = keypointNumber;
+    // socre dimension is [480 x 640]
+    for(int i = 0; i < score.size[0]; i++ )
+    {
+        for(int j = 0; j <score.size[1]; j++ )
+        {
+            temp = score.ptr<float>(i, j);
+            if( temp > kepointThreshold)
+            {
+                queue.emplace_back(temp, (i, j));
+            }
+        }
+    }
+
+    // descending order
+    std::sort(queue.begin(), queue.end());
+
+    if(queue.size() > keypointNumber)
+    {
+        queue.resize(K);
+    }
+
+    keypoints = queue;
+}
+
+// Using the HF-Net to extract feature from gray images.
+void HFNetFetureExtract(InputArray _rgb, vector<PQueueElem>& keypoints, OutputArray localDescriptors, OutputArray globalDescriptor,
+                        const int  keypointNumber, const float kepointThreshold)
+{
+    // Pretrained Model can be found at:https://drive.google.com/drive/folders/1MXXyBYcW_9beggk4sQ9CPP2nLyJkIHxI?usp=sharing
+    // For now, only the OpenVINO backend is supported. Other OpenCV DNN backends will be supported later.
+
+    string hfNetBin = "";
+    string hfNetxml = "";
+    Net net = readNet(hfNetBin, hfNetxml);
+
+    std::vector<String> outNames;
+    std::vector<Mat> outs;
+    // The size of input image is [480x640].
+    Mat blob = blobFromImage(_rgb, 1.0, Size(640, 480));
+
+    net.setPreferableBackend(DNN_BACKEND_INFERENCE_ENGINE);
+    outNames = net.getUnconnectedOutLayersNames();
+    net.forward(outs, outNames);
+
+    // Output dimension:
+    // 1x4096 global decs
+    // 1x60x80x256 local description
+    // 1x480x640 score
+    globalDescriptor = outs[0];
+    outs[2] = outs[2].reshape(0, 480); // reshape the 1x480x680 to 480x640.
+
+    keypointSelection(outs[2], keypoints, keypointNumber, kepointThreshold);
+
+    //! TODO: post processing of localDescriptors.
+
+
+    //! TODO: post processing of globalDescriptor.
+
+
+}
+
 template<typename MatType>
-bool LargeKinfuImpl<MatType>::updateT(const MatType& _depth)
+bool LargeKinfuImpl<MatType>::updateT(const MatType& _depth, const MatType& _rgb)
 {
     CV_TRACE_FUNCTION();
 
@@ -221,10 +303,23 @@ bool LargeKinfuImpl<MatType>::updateT(const MatType& _depth)
     else
         depth = _depth;
 
+    // _depth
     std::vector<MatType> newPoints, newNormals;
     makeFrameFromDepth(depth, newPoints, newNormals, params.intr, params.pyramidLevels, params.depthFactor,
                        params.bilateral_sigma_depth, params.bilateral_sigma_spatial, params.bilateral_kernel_size,
                        params.truncateThreshold);
+
+    // _rgb for HF-Net
+    vector<PQueueElem>& keypoints;
+    Mat localDescriptors, globalDescriptor;
+    HFNetFetureExtract(_rgb, keypoints, localDescriptors, globalDescriptor, 500, 0.002);
+
+
+    //! TODO: Loop closuring
+    // 1. loop all keyframes in KeyframeDataset and detect the Loop with BoW.
+    // 2. check if the current frame is keyframe. If it is, add it in to KeyframeDataset.
+    // 3. If a loop closuring was detected, run the submap optimazation.
+
 
     CV_LOG_INFO(NULL, "Current frameID: " << frameCounter);
     for (const auto& it : submapMgr->activeSubmaps)
