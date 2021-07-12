@@ -135,6 +135,45 @@ namespace cv
             {
             }
 
+            void read( const FileNode& fn) CV_OVERRIDE
+            {
+              // if node is empty, keep previous value
+              if (!fn["patch_radius"].empty())
+                fn["patch_radius"] >> m_patch_radius;
+              if (!fn["search_area_radius"].empty())
+                fn["search_area_radius"] >> m_search_area_radius;
+              if (!fn["nms_radius"].empty())
+                fn["nms_radius"] >> m_nms_radius;
+              if (!fn["nms_scale_radius"].empty())
+                fn["nms_scale_radius"] >> m_nms_scale_radius;
+              if (!fn["th_saliency"].empty())
+                fn["th_saliency"] >> m_th_saliency;
+              if (!fn["kNN"].empty())
+                fn["kNN"] >> m_kNN;
+              if (!fn["scale_factor"].empty())
+                fn["scale_factor"] >> m_scale_factor;
+              if (!fn["n_scales"].empty())
+                fn["n_scales"] >> m_n_scales;
+              if (!fn["compute_orientation"].empty())
+                fn["compute_orientation"] >> m_compute_orientation;
+            }
+            void write( FileStorage& fs) const CV_OVERRIDE
+            {
+              if(fs.isOpened())
+              {
+                fs << "name" << getDefaultName();
+                fs << "patch_radius" << m_patch_radius;
+                fs << "search_area_radius" << m_search_area_radius;
+                fs << "nms_radius" << m_nms_radius;
+                fs << "nms_scale_radius" << m_nms_scale_radius;
+                fs << "th_saliency" << m_th_saliency;
+                fs << "kNN" << m_kNN;
+                fs << "scale_factor" << m_scale_factor;
+                fs << "n_scales" << m_n_scales;
+                fs << "compute_orientation" << m_compute_orientation;
+              }
+            }
+
             void detect(InputArray _image, std::vector<KeyPoint>& keypoints, InputArray _mask) CV_OVERRIDE
             {
                 m_mask = _mask.getMat();
@@ -711,6 +750,11 @@ namespace cv
             return makePtr<MSDDetector_Impl>(m_patch_radius, m_search_area_radius,
                     m_nms_radius, m_nms_scale_radius, m_th_saliency, m_kNN, m_scale_factor,
                     m_n_scales, m_compute_orientation);
+        }
+
+        String MSDDetector::getDefaultName() const
+        {
+            return (Feature2D::getDefaultName() + ".MSD");
         }
 
     }
